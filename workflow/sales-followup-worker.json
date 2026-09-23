@@ -1,0 +1,550 @@
+{
+  "name": "WhatsApp Sales Follow-up Worker - Portfolio Demo",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "schedule",
+      "name": "Every 30 Minutes"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/sales_followups?status=eq.scheduled&due_at=lte.' + encodeURIComponent(new Date().toISOString()) + '&select=*&order=due_at.asc&limit=25' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        0
+      ],
+      "id": "get-due",
+      "name": "Get Due Follow-ups"
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $json;\nconst rows = Array.isArray(raw) ? raw : (Array.isArray(raw.body) ? raw.body : [raw]);\nreturn rows.filter(r => r?.id).map(r => ({ json: r }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        0
+      ],
+      "id": "split-due",
+      "name": "Split Due Follow-ups"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/sales_leads?wa_id=eq.' + encodeURIComponent($json.wa_id) + '&select=*' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        0
+      ],
+      "id": "fetch-lead",
+      "name": "Reload Lead State"
+    },
+    {
+      "parameters": {
+        "jsCode": "const job = $('Split Due Follow-ups').item.json;\nconst raw = $json;\nconst lead = Array.isArray(raw) ? (raw[0] ?? {}) : (Array.isArray(raw.body) ? (raw.body[0] ?? {}) : raw);\nconst terminal = new Set(['WON','LOST']);\nconst eligible = Boolean(lead.wa_id)\n  && !lead.opted_out\n  && !lead.human_handoff\n  && !terminal.has(String(lead.lead_stage ?? '').toUpperCase());\n\nconst lastContact = lead.last_contact_at ? new Date(lead.last_contact_at).getTime() : 0;\nconst hoursSince = lastContact ? (Date.now() - lastContact) / 3600000 : 999;\nconst deliveryMode = hoursSince <= 23 ? 'session_text' : 'approved_template';\n\nreturn [{\n  json: {\n    followup: job,\n    lead,\n    eligible,\n    delivery_mode: deliveryMode,\n    hours_since_last_contact: Math.round(hoursSince * 10) / 10\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        0
+      ],
+      "id": "eligibility",
+      "name": "Recheck Follow-up Eligibility"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "eligible",
+              "leftValue": "={{ $json.eligible }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1200,
+        0
+      ],
+      "id": "eligible-if",
+      "name": "Still Eligible?"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Write one concise WhatsApp sales follow-up.\\n\\nFictional business: Northstar Automation Studio helps small and mid-sized companies automate repetitive sales, support, operations, and reporting workflows.\\nLead state: {{ JSON.stringify($json.lead) }}\\nFollow-up reason: {{ $json.followup.reason }}\\n\\nRules:\\n- refer naturally to known context\\n- no pressure or fake urgency\\n- one simple CTA\\n- do not invent pricing or availability\\n- do not claim a booking exists unless the lead state says so",
+        "options": {
+          "systemMessage": "You write short, respectful B2B WhatsApp follow-ups."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.6,
+      "position": [
+        1440,
+        -112
+      ],
+      "id": "followup-draft",
+      "name": "Generate Follow-up"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4o-mini"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        1440,
+        176
+      ],
+      "id": "followup-model",
+      "name": "Follow-up Chat Model"
+    },
+    {
+      "parameters": {
+        "jsCode": "const ctx = $('Recheck Follow-up Eligibility').item.json;\nconst text = String($json.text ?? $json.output ?? '').trim();\nreturn [{ json: { ...ctx, followup_text: text } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        -112
+      ],
+      "id": "normalize-followup",
+      "name": "Normalize Follow-up"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "session-mode",
+              "leftValue": "={{ $json.delivery_mode }}",
+              "rightValue": "session_text",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1920,
+        -112
+      ],
+      "id": "delivery-if",
+      "name": "Session Text Allowed?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.facebook.com/' + $env.META_GRAPH_API_VERSION + '/' + $env.WHATSAPP_PHONE_NUMBER_ID + '/messages' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.WHATSAPP_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ messaging_product: 'whatsapp', to: $json.lead.wa_id, type: 'text', text: { body: $json.followup_text } }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2160,
+        -224
+      ],
+      "id": "send-session",
+      "name": "Send Session Follow-up"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.facebook.com/' + $env.META_GRAPH_API_VERSION + '/' + $env.WHATSAPP_PHONE_NUMBER_ID + '/messages' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.WHATSAPP_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ messaging_product: 'whatsapp', to: $json.lead.wa_id, type: 'template', template: { name: $env.WHATSAPP_FOLLOWUP_TEMPLATE_NAME, language: { code: $env.WHATSAPP_TEMPLATE_LANGUAGE || 'en' } } }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2160,
+        0
+      ],
+      "id": "send-template",
+      "name": "Send Approved Template Follow-up"
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({ ...$('Recheck Follow-up Eligibility').item.json, sent: false, skip_reason: 'Lead no longer eligible for automated follow-up.' }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1440,
+        96
+      ],
+      "id": "skip-followup",
+      "name": "Skip Follow-up"
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/sales_followups?id=eq.' + encodeURIComponent($('Split Due Follow-ups').item.json.id) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ status: 'sent', attempts: Number($('Split Due Follow-ups').item.json.attempts || 0) + 1, updated_at: new Date().toISOString() }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2400,
+        -112
+      ],
+      "id": "mark-sent",
+      "name": "Mark Follow-up Sent"
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/sales_followups?id=eq.' + encodeURIComponent($('Split Due Follow-ups').item.json.id) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ status: 'skipped', updated_at: new Date().toISOString() }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1680,
+        96
+      ],
+      "id": "mark-skipped",
+      "name": "Mark Follow-up Skipped"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Every 30 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Get Due Follow-ups",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Due Follow-ups": {
+      "main": [
+        [
+          {
+            "node": "Split Due Follow-ups",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Due Follow-ups": {
+      "main": [
+        [
+          {
+            "node": "Reload Lead State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reload Lead State": {
+      "main": [
+        [
+          {
+            "node": "Recheck Follow-up Eligibility",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recheck Follow-up Eligibility": {
+      "main": [
+        [
+          {
+            "node": "Still Eligible?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Still Eligible?": {
+      "main": [
+        [
+          {
+            "node": "Generate Follow-up",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Skip Follow-up",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Follow-up Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Generate Follow-up",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Follow-up": {
+      "main": [
+        [
+          {
+            "node": "Normalize Follow-up",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Follow-up": {
+      "main": [
+        [
+          {
+            "node": "Session Text Allowed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Session Text Allowed?": {
+      "main": [
+        [
+          {
+            "node": "Send Session Follow-up",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Approved Template Follow-up",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Session Follow-up": {
+      "main": [
+        [
+          {
+            "node": "Mark Follow-up Sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Approved Template Follow-up": {
+      "main": [
+        [
+          {
+            "node": "Mark Follow-up Sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skip Follow-up": {
+      "main": [
+        [
+          {
+            "node": "Mark Follow-up Skipped",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "portfolio-sales-followup-worker-v1",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
