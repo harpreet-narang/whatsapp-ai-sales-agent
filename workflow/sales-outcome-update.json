@@ -1,0 +1,352 @@
+{
+  "name": "WhatsApp Sales Outcome Update - Portfolio Demo",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "sales-outcome-update",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "outcome-webhook",
+      "name": "Outcome Update Webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "const src = $json.body ?? $json;\nconst waId = String(src.wa_id ?? '').trim();\nconst outcome = String(src.outcome ?? '').trim().toUpperCase();\nconst updatedBy = String(src.updated_by ?? 'human').trim();\nconst note = String(src.note ?? '').trim();\n\nif (!waId) throw new Error('wa_id is required');\nif (!['WON','LOST','NURTURE'].includes(outcome)) {\n  throw new Error('outcome must be WON, LOST, or NURTURE');\n}\n\nreturn [{ json: { wa_id: waId, outcome, updated_by: updatedBy, note, updated_at: new Date().toISOString() } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "id": "validate-outcome",
+      "name": "Validate Human Outcome"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/sales_leads?wa_id=eq.' + encodeURIComponent($json.wa_id) + '&select=wa_id,lead_stage' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        0
+      ],
+      "id": "load-current-stage",
+      "name": "Load Current Stage"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $('Validate Human Outcome').first().json;\nconst raw = $json;\nconst lead = Array.isArray(raw) ? (raw[0] ?? {}) : (Array.isArray(raw.body) ? (raw.body[0] ?? {}) : raw);\nif (!lead.wa_id) throw new Error('Lead not found');\nreturn [{ json: { ...input, previous_stage: lead.lead_stage ?? 'HUMAN_HANDOFF' } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        0
+      ],
+      "id": "merge-outcome",
+      "name": "Prepare Outcome Transition"
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/sales_leads?wa_id=eq.' + encodeURIComponent($json.wa_id) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ lead_stage: $json.outcome, final_outcome: $json.outcome, human_handoff: false, next_followup_at: null, updated_at: $json.updated_at }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        960,
+        -96
+      ],
+      "id": "update-lead-outcome",
+      "name": "Update Lead Outcome"
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/sales_followups?wa_id=eq.' + encodeURIComponent($('Prepare Outcome Transition').first().json.wa_id) + '&status=eq.scheduled' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ status: 'cancelled', updated_at: new Date().toISOString() }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1200,
+        -96
+      ],
+      "id": "cancel-followups",
+      "name": "Cancel Open Follow-ups"
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/sales_handoffs?wa_id=eq.' + encodeURIComponent($('Prepare Outcome Transition').first().json.wa_id) + '&status=in.(open,accepted)' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ status: 'resolved', resolved_at: new Date().toISOString() }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1440,
+        -96
+      ],
+      "id": "resolve-handoff",
+      "name": "Resolve Human Handoff"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/sales_stage_history' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ wa_id: $('Prepare Outcome Transition').first().json.wa_id, from_stage: $('Prepare Outcome Transition').first().json.previous_stage, to_stage: $('Prepare Outcome Transition').first().json.outcome, reason: $('Prepare Outcome Transition').first().json.note || 'Human sales outcome update', changed_by: $('Prepare Outcome Transition').first().json.updated_by }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1680,
+        -96
+      ],
+      "id": "log-outcome-stage",
+      "name": "Log Outcome Transition"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'updated', wa_id: $('Prepare Outcome Transition').first().json.wa_id, outcome: $('Prepare Outcome Transition').first().json.outcome }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1920,
+        -96
+      ],
+      "id": "outcome-response",
+      "name": "Return Outcome Result"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Outcome Update Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate Human Outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Human Outcome": {
+      "main": [
+        [
+          {
+            "node": "Load Current Stage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Current Stage": {
+      "main": [
+        [
+          {
+            "node": "Prepare Outcome Transition",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Outcome Transition": {
+      "main": [
+        [
+          {
+            "node": "Update Lead Outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Lead Outcome": {
+      "main": [
+        [
+          {
+            "node": "Cancel Open Follow-ups",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cancel Open Follow-ups": {
+      "main": [
+        [
+          {
+            "node": "Resolve Human Handoff",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve Human Handoff": {
+      "main": [
+        [
+          {
+            "node": "Log Outcome Transition",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Outcome Transition": {
+      "main": [
+        [
+          {
+            "node": "Return Outcome Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "portfolio-sales-outcome-update-v1",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
