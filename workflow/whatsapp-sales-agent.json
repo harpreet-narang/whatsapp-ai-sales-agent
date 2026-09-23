@@ -1,0 +1,946 @@
+{
+  "name": "WhatsApp AI Sales Agent - Portfolio Demo",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "whatsapp-sales-agent",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "wa-webhook",
+      "name": "WhatsApp Inbound Webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "const src = $json.body ?? $json;\n\n// Supports both a simplified portfolio payload and a Meta-style webhook payload.\nlet waId = src.wa_id;\nlet displayName = src.name ?? '';\nlet text = src.text;\nlet messageId = src.message_id;\nlet timestamp = src.timestamp;\nlet rawPayload = src;\n\nif (!waId && src.entry?.[0]?.changes?.[0]?.value) {\n  const value = src.entry[0].changes[0].value;\n  const msg = value.messages?.[0];\n\n  // Delivery/read status events do not contain a customer message.\n  if (!msg) {\n    return [{ json: { ignore: true, reason: 'non_message_event', raw_payload: src } }];\n  }\n\n  waId = msg.from;\n  displayName = value.contacts?.[0]?.profile?.name ?? '';\n  messageId = msg.id;\n  timestamp = msg.timestamp ? new Date(Number(msg.timestamp) * 1000).toISOString() : new Date().toISOString();\n\n  if (msg.type === 'text') text = msg.text?.body;\n  else if (msg.type === 'button') text = msg.button?.text;\n  else if (msg.type === 'interactive') {\n    text = msg.interactive?.button_reply?.title ?? msg.interactive?.list_reply?.title ?? '';\n  } else {\n    text = '[unsupported message type: ' + String(msg.type ?? 'unknown') + ']';\n  }\n}\n\nwaId = String(waId ?? '').trim();\ntext = String(text ?? '').trim();\n\nif (!waId || !text) {\n  return [{ json: { ignore: true, reason: 'missing_wa_id_or_text', raw_payload: src } }];\n}\n\nreturn [{\n  json: {\n    ignore: false,\n    wa_id: waId,\n    display_name: String(displayName ?? ''),\n    message_text: text,\n    provider_message_id: String(messageId ?? ''),\n    received_at: timestamp || new Date().toISOString(),\n    raw_payload: rawPayload\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ],
+      "id": "normalize-wa",
+      "name": "Normalize WhatsApp Message"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "not-ignore",
+              "leftValue": "={{ $json.ignore }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        448,
+        0
+      ],
+      "id": "usable-message",
+      "name": "Usable Customer Message?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/sales_leads?on_conflict=wa_id' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Prefer",
+              "value": "resolution=merge-duplicates,return=representation"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ wa_id: $json.wa_id, display_name: $json.display_name, last_contact_at: $json.received_at, source: 'whatsapp', updated_at: new Date().toISOString() }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        688,
+        -64
+      ],
+      "id": "upsert-shell",
+      "name": "Load or Create Lead"
+    },
+    {
+      "parameters": {
+        "jsCode": "const inbound = $('Normalize WhatsApp Message').first().json;\nconst raw = $json;\nconst lead = Array.isArray(raw) ? (raw[0] ?? {}) : (Array.isArray(raw.body) ? (raw.body[0] ?? {}) : raw);\n\nreturn [{\n  json: {\n    ...inbound,\n    current_lead: {\n      wa_id: lead.wa_id ?? inbound.wa_id,\n      display_name: lead.display_name ?? inbound.display_name,\n      lead_stage: lead.lead_stage ?? 'NEW',\n      product_interest: lead.product_interest ?? '',\n      company: lead.company ?? '',\n      role: lead.role ?? '',\n      budget: lead.budget ?? '',\n      timeline: lead.timeline ?? '',\n      pain_point: lead.pain_point ?? '',\n      objection: lead.objection ?? '',\n      last_intent: lead.last_intent ?? '',\n      lead_score: Number(lead.lead_score ?? 0),\n      meeting_status: lead.meeting_status ?? 'not_requested',\n      preferred_meeting_time: lead.preferred_meeting_time ?? '',\n      human_handoff: Boolean(lead.human_handoff),\n      opted_out: Boolean(lead.opted_out),\n      final_outcome: lead.final_outcome ?? null,\n      next_followup_at: lead.next_followup_at ?? null\n    }\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        928,
+        -64
+      ],
+      "id": "build-context",
+      "name": "Build Persistent Sales Context"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Interpret the latest WhatsApp sales message and extract structured signals.\\n\\nCurrent lead state: {{ JSON.stringify($json.current_lead) }}\\nLatest customer message: {{ $json.message_text }}\\n\\nChoose intent from: greeting, product_question, discovery_answer, qualification_answer, objection, booking_request, booking_confirmation, human_request, purchase_signal, decline, opt_out, other.\\n\\nExtract only information actually present or strongly implied by the message. Keep unknown fields empty. Do not choose the sales stage.",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You are a conservative B2B sales-intent extractor. You interpret language; deterministic workflow code controls sales stages. Never invent company, budget, timeline, or buying intent."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.6,
+      "position": [
+        1184,
+        -64
+      ],
+      "id": "intent-chain",
+      "name": "Extract Sales Intent + Signals"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4o-mini"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        1184,
+        240
+      ],
+      "id": "chat-model",
+      "name": "Chat Model"
+    },
+    {
+      "parameters": {
+        "jsonSchemaExample": "{\n  \"intent\": \"discovery_answer\",\n  \"product_interest\": \"lead follow-up automation\",\n  \"company\": \"\",\n  \"role\": \"\",\n  \"budget\": \"\",\n  \"timeline\": \"this month\",\n  \"pain_point\": \"manual lead follow-up takes too much time\",\n  \"objection\": \"\",\n  \"preferred_meeting_time\": \"\",\n  \"wants_booking\": false,\n  \"booking_confirmed\": false,\n  \"wants_human\": false,\n  \"purchase_signal\": true,\n  \"opted_out\": false,\n  \"confidence\": 0.91\n}",
+        "autoFix": true
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        1392,
+        240
+      ],
+      "id": "intent-parser",
+      "name": "Sales Signal Parser"
+    },
+    {
+      "parameters": {
+        "jsCode": "const ctx = $('Build Persistent Sales Context').first().json;\nconst raw = $json.output && typeof $json.output === 'object' ? $json.output : $json;\nconst old = ctx.current_lead;\n\nconst pick = (fresh, previous) => {\n  const v = String(fresh ?? '').trim();\n  return v || String(previous ?? '');\n};\n\nconst signals = {\n  intent: String(raw.intent ?? 'other').toLowerCase(),\n  product_interest: pick(raw.product_interest, old.product_interest),\n  company: pick(raw.company, old.company),\n  role: pick(raw.role, old.role),\n  budget: pick(raw.budget, old.budget),\n  timeline: pick(raw.timeline, old.timeline),\n  pain_point: pick(raw.pain_point, old.pain_point),\n  objection: pick(raw.objection, old.objection),\n  preferred_meeting_time: pick(raw.preferred_meeting_time, old.preferred_meeting_time),\n  wants_booking: Boolean(raw.wants_booking),\n  booking_confirmed: Boolean(raw.booking_confirmed),\n  wants_human: Boolean(raw.wants_human),\n  purchase_signal: Boolean(raw.purchase_signal),\n  opted_out: Boolean(raw.opted_out),\n  confidence: Math.max(0, Math.min(1, Number(raw.confidence ?? 0) || 0))\n};\n\nlet score = 0;\nif (signals.pain_point) score += 20;\nif (signals.product_interest) score += 15;\nif (signals.company) score += 10;\nif (signals.role) score += 10;\nif (signals.budget) score += 15;\nif (signals.timeline) score += 15;\nif (signals.purchase_signal) score += 10;\nif (signals.wants_booking || signals.booking_confirmed) score += 5;\nscore = Math.min(score, 100);\n\nconst current = String(old.lead_stage ?? 'NEW').toUpperCase();\nconst terminal = new Set(['WON','LOST','NURTURE']);\nlet next = current;\nlet reason = 'No stage transition required.';\n\nif (terminal.has(current)) {\n  next = current;\n  reason = 'Terminal stage is human-controlled and remains unchanged.';\n} else if (signals.opted_out || signals.intent === 'opt_out') {\n  next = 'LOST';\n  reason = 'Prospect explicitly opted out.';\n} else if (signals.wants_human || signals.intent === 'human_request') {\n  next = 'HUMAN_HANDOFF';\n  reason = 'Prospect explicitly requested a person.';\n} else if (signals.booking_confirmed && current === 'BOOKING') {\n  next = 'HUMAN_HANDOFF';\n  reason = 'Booking was confirmed; hand off to sales owner.';\n} else if (signals.wants_booking || signals.intent === 'booking_request') {\n  next = 'BOOKING';\n  reason = 'Prospect requested a meeting or call.';\n} else if (current === 'NEW') {\n  next = 'DISCOVERY';\n  reason = 'First usable prospect conversation started.';\n} else if (current === 'DISCOVERY' && (signals.pain_point || signals.product_interest)) {\n  next = 'QUALIFYING';\n  reason = 'Pain point or product interest has been captured.';\n} else if (current === 'QUALIFYING' && score >= 45 && signals.purchase_signal) {\n  next = 'INTERESTED';\n  reason = 'Qualification signals and explicit buying interest are present.';\n}\n\nlet meetingStatus = old.meeting_status ?? 'not_requested';\nif (next === 'BOOKING') meetingStatus = signals.booking_confirmed ? 'confirmed' : 'requested';\nif (next === 'HUMAN_HANDOFF' && current === 'BOOKING' && signals.booking_confirmed) meetingStatus = 'confirmed';\n\nconst humanHandoff = next === 'HUMAN_HANDOFF' ? true : Boolean(old.human_handoff);\nconst optedOut = Boolean(old.opted_out) || signals.opted_out;\nconst finalOutcome = next === 'LOST' && signals.opted_out ? 'LOST' : (old.final_outcome ?? null);\n\nlet nextFollowupAt = null;\nif (!humanHandoff && !optedOut && !terminal.has(next) && !['BOOKING'].includes(next)) {\n  const hours = next === 'INTERESTED' ? 24 : 48;\n  nextFollowupAt = new Date(Date.now() + hours * 3600 * 1000).toISOString();\n}\n\nreturn [{\n  json: {\n    ...ctx,\n    signals,\n    previous_stage: current,\n    next_stage: next,\n    stage_changed: next !== current,\n    stage_reason: reason,\n    lead_score: score,\n    meeting_status: meetingStatus,\n    human_handoff: humanHandoff,\n    opted_out: optedOut,\n    final_outcome: finalOutcome,\n    next_followup_at: nextFollowupAt\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1456,
+        -64
+      ],
+      "id": "state-engine",
+      "name": "Apply Sales State Machine"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Write the next WhatsApp sales reply for this fictional company.\\n\\nBusiness profile:\\nNorthstar Automation Studio helps small and mid-sized businesses automate repetitive sales, support, operations, and reporting workflows. Services include workflow automation, AI sales/support assistants, API integrations, and automation audits. Pricing is custom after understanding scope. Never invent a fixed price, client result, integration, or availability.\\n\\nLead state: {{ $json.previous_stage }} → {{ $json.next_stage }}\\nLead score: {{ $json.lead_score }}\\nKnown context: {{ JSON.stringify($json.signals) }}\\nLatest message: {{ $json.message_text }}\\nStage reason: {{ $json.stage_reason }}\\n\\nRules:\\n- keep it natural and concise for WhatsApp\\n- do not repeat a question already answered\\n- ask at most one useful next question\\n- if there is an objection, acknowledge it directly\\n- if next_stage is BOOKING, acknowledge the meeting request and use their preferred time if provided\\n- if next_stage is HUMAN_HANDOFF, say a person will take over and do not continue qualification\\n- if opted_out is true, confirm no further automated follow-up\\n- never claim a meeting is booked unless booking_confirmed is true",
+        "options": {
+          "systemMessage": "You are a concise B2B WhatsApp sales assistant. Use the workflow state as authoritative. Do not override business rules."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.6,
+      "position": [
+        1712,
+        -64
+      ],
+      "id": "reply-chain",
+      "name": "Generate Contextual Sales Reply"
+    },
+    {
+      "parameters": {
+        "jsCode": "const state = $('Apply Sales State Machine').first().json;\nconst output = String($json.text ?? $json.output ?? $json.response ?? '').trim();\n\nreturn [{\n  json: {\n    ...state,\n    reply_text: output || (state.human_handoff\n      ? 'Thanks — I’ll have someone from the team take over from here.'\n      : 'Thanks. I’ve noted that and we’ll take the next step from here.')\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1952,
+        -64
+      ],
+      "id": "normalize-reply",
+      "name": "Normalize Reply"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/sales_leads?on_conflict=wa_id' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Prefer",
+              "value": "resolution=merge-duplicates,return=minimal"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ wa_id: $json.wa_id, display_name: $json.display_name, lead_stage: $json.next_stage, product_interest: $json.signals.product_interest || null, company: $json.signals.company || null, role: $json.signals.role || null, budget: $json.signals.budget || null, timeline: $json.signals.timeline || null, pain_point: $json.signals.pain_point || null, objection: $json.signals.objection || null, last_intent: $json.signals.intent, lead_score: $json.lead_score, meeting_status: $json.meeting_status, preferred_meeting_time: $json.signals.preferred_meeting_time || null, human_handoff: $json.human_handoff, opted_out: $json.opted_out, last_contact_at: $json.received_at, next_followup_at: $json.next_followup_at, final_outcome: $json.final_outcome, updated_at: new Date().toISOString() }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2192,
+        -64
+      ],
+      "id": "persist-lead",
+      "name": "Persist Lead State"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/sales_messages' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ wa_id: $('Normalize Reply').first().json.wa_id, provider_message_id: $('Normalize Reply').first().json.provider_message_id || null, direction: 'inbound', message_text: $('Normalize Reply').first().json.message_text, detected_intent: $('Normalize Reply').first().json.signals.intent, lead_stage: $('Normalize Reply').first().json.next_stage, raw_payload: $('Normalize Reply').first().json.raw_payload }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2432,
+        -64
+      ],
+      "id": "log-inbound",
+      "name": "Log Inbound Message"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "stage-changed",
+              "leftValue": "={{ $('Normalize Reply').first().json.stage_changed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2672,
+        -64
+      ],
+      "id": "stage-changed-if",
+      "name": "Stage Changed?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/sales_stage_history' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ wa_id: $('Normalize Reply').first().json.wa_id, from_stage: $('Normalize Reply').first().json.previous_stage, to_stage: $('Normalize Reply').first().json.next_stage, reason: $('Normalize Reply').first().json.stage_reason, changed_by: 'workflow' }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2912,
+        -176
+      ],
+      "id": "log-stage",
+      "name": "Log Stage Transition"
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify($('Normalize Reply').first().json) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2912,
+        32
+      ],
+      "id": "stage-pass",
+      "name": "Continue Without Stage Log"
+    },
+    {
+      "parameters": {
+        "jsCode": "const s = $('Normalize Reply').first().json;\nreturn [{\n  json: {\n    ...s,\n    should_schedule_followup: Boolean(s.next_followup_at) && !s.human_handoff && !s.opted_out,\n    should_handoff: Boolean(s.human_handoff)\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3152,
+        -64
+      ],
+      "id": "post-state",
+      "name": "Prepare Post-Processing"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "followup",
+              "leftValue": "={{ $json.should_schedule_followup }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3392,
+        -64
+      ],
+      "id": "followup-if",
+      "name": "Schedule Follow-up?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/sales_followups' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ wa_id: $json.wa_id, due_at: $json.next_followup_at, status: 'scheduled', reason: 'Stage-based sales follow-up' }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3632,
+        -176
+      ],
+      "id": "create-followup",
+      "name": "Create Follow-up Job"
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        3632,
+        32
+      ],
+      "id": "no-followup",
+      "name": "No Follow-up Needed"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.facebook.com/' + $env.META_GRAPH_API_VERSION + '/' + $env.WHATSAPP_PHONE_NUMBER_ID + '/messages' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.WHATSAPP_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ messaging_product: 'whatsapp', to: $('Normalize Reply').first().json.wa_id, type: 'text', text: { body: $('Normalize Reply').first().json.reply_text } }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3888,
+        -64
+      ],
+      "id": "send-wa",
+      "name": "Send WhatsApp Reply"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/sales_messages' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ wa_id: $('Normalize Reply').first().json.wa_id, direction: 'outbound', message_text: $('Normalize Reply').first().json.reply_text, detected_intent: 'sales_reply', lead_stage: $('Normalize Reply').first().json.next_stage, raw_payload: $json }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4128,
+        -64
+      ],
+      "id": "log-outbound",
+      "name": "Log Outbound Message"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "handoff",
+              "leftValue": "={{ $('Prepare Post-Processing').first().json.should_handoff }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        4368,
+        -64
+      ],
+      "id": "handoff-if",
+      "name": "Human Handoff?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/sales_handoffs' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ wa_id: $('Normalize Reply').first().json.wa_id, reason: $('Normalize Reply').first().json.stage_reason, status: 'open' }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4608,
+        -176
+      ],
+      "id": "create-handoff",
+      "name": "Create Human Handoff"
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({ status: 'processed', wa_id: $('Normalize Reply').first().json.wa_id, stage: $('Normalize Reply').first().json.next_stage }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        4848,
+        -64
+      ],
+      "id": "done",
+      "name": "Processed"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "WhatsApp Inbound Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize WhatsApp Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize WhatsApp Message": {
+      "main": [
+        [
+          {
+            "node": "Usable Customer Message?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Usable Customer Message?": {
+      "main": [
+        [
+          {
+            "node": "Load or Create Lead",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Load or Create Lead": {
+      "main": [
+        [
+          {
+            "node": "Build Persistent Sales Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Persistent Sales Context": {
+      "main": [
+        [
+          {
+            "node": "Extract Sales Intent + Signals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Extract Sales Intent + Signals",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "Generate Contextual Sales Reply",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sales Signal Parser": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Extract Sales Intent + Signals",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Sales Intent + Signals": {
+      "main": [
+        [
+          {
+            "node": "Apply Sales State Machine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Sales State Machine": {
+      "main": [
+        [
+          {
+            "node": "Generate Contextual Sales Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Contextual Sales Reply": {
+      "main": [
+        [
+          {
+            "node": "Normalize Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Reply": {
+      "main": [
+        [
+          {
+            "node": "Persist Lead State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Persist Lead State": {
+      "main": [
+        [
+          {
+            "node": "Log Inbound Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Inbound Message": {
+      "main": [
+        [
+          {
+            "node": "Stage Changed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Stage Changed?": {
+      "main": [
+        [
+          {
+            "node": "Log Stage Transition",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Continue Without Stage Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Stage Transition": {
+      "main": [
+        [
+          {
+            "node": "Prepare Post-Processing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Continue Without Stage Log": {
+      "main": [
+        [
+          {
+            "node": "Prepare Post-Processing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Post-Processing": {
+      "main": [
+        [
+          {
+            "node": "Schedule Follow-up?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Follow-up?": {
+      "main": [
+        [
+          {
+            "node": "Create Follow-up Job",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Follow-up Needed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Follow-up Job": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No Follow-up Needed": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send WhatsApp Reply": {
+      "main": [
+        [
+          {
+            "node": "Log Outbound Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Outbound Message": {
+      "main": [
+        [
+          {
+            "node": "Human Handoff?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Human Handoff?": {
+      "main": [
+        [
+          {
+            "node": "Create Human Handoff",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Processed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Human Handoff": {
+      "main": [
+        [
+          {
+            "node": "Processed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "portfolio-whatsapp-sales-agent-v1",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
